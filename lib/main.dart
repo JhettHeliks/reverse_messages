@@ -3,9 +3,12 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:html/parser.dart' as html_parser;
+import 'package:html/dom.dart' as dom;
 import 'package:file_saver/file_saver.dart';
 import 'package:flutter_widget_from_html_core/flutter_widget_from_html_core.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
+import 'dart:io';
 
 // Data class to hold message information
 class Message {
@@ -111,6 +114,44 @@ class _ChatFixerHomePageState extends State<ChatFixerHomePage> {
     }
   }
 
+  String? _findExportRoot(String filePath) {
+    Directory current = Directory(p.dirname(filePath));
+    // Loop up to 10 times to prevent infinite loops on weird paths
+    for (int i = 0; i < 10; i++) {
+      final activityDir = Directory(
+        p.join(current.path, 'your_activity_across_facebook'),
+      );
+      // A common root folder name
+      final rootDirName = p.basename(current.path);
+      if (activityDir.existsSync() || rootDirName.startsWith('facebook-')) {
+        return current.path;
+      }
+      if (current.parent.path == current.path) {
+        // Reached the filesystem root (e.g., '/')
+        break;
+      }
+      current = current.parent;
+    }
+    return null; // Root not found
+  }
+
+  void _updateAssetPaths(dom.Document document, String rootPath) {
+    final elements = document.querySelectorAll('img, video, audio');
+
+    for (var el in elements) {
+      final srcAttr = 'src';
+      String? oldSrc = el.attributes[srcAttr];
+
+      if (oldSrc != null &&
+          !oldSrc.startsWith('http') &&
+          !oldSrc.startsWith('data:')) {
+        final newSrc = p.join(rootPath, oldSrc);
+        // Use Uri.file to ensure correct formatting for file URIs across platforms
+        el.attributes[srcAttr] = Uri.file(newSrc).toString();
+      }
+    }
+  }
+
   Future<void> _pickAndProcessFile() async {
     setState(() {
       _isLoading = true;
@@ -132,9 +173,26 @@ class _ChatFixerHomePageState extends State<ChatFixerHomePage> {
       }
 
       final file = result.files.single;
+      final filePath = file.path;
+      if (filePath == null) {
+        throw Exception(
+          'Could not determine file path. This feature is not supported on the web platform.',
+        );
+      }
+
+      final rootDir = _findExportRoot(filePath);
+      if (rootDir == null) {
+        throw Exception(
+          "Could not find the root of the Facebook export directory. Please ensure the selected HTML file is inside your full unzipped Facebook data folder.",
+        );
+      }
+
       final fileBytes = file.bytes!;
       final htmlString = utf8.decode(fileBytes);
       final doc = html_parser.parse(htmlString);
+
+      // IMPORTANT: Update asset paths to be absolute file paths
+      _updateAssetPaths(doc, rootDir);
 
       const messageContainerSelector = 'main._a706';
       final messageContainer = doc.querySelector(messageContainerSelector);
@@ -399,8 +457,9 @@ class MessageBubble extends StatelessWidget {
           maxWidth: MediaQuery.of(context).size.width * 0.75,
         ),
         child: Column(
-          crossAxisAlignment:
-              isCurrentUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          crossAxisAlignment: isCurrentUser
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!isCurrentUser)
